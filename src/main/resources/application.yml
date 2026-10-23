@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: employee-management
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/employee_db}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:password}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: ${DDL_AUTO:update}   # use "validate" + a migration tool (Flyway/Liquibase) in production
+    properties:
+      hibernate:
+        format_sql: true
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: never
+    include-stacktrace: never
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
