@@ -11,6 +11,7 @@ Bean Validation, centralised exception handling, pagination, search, status filt
 | Input validation | Jakarta Bean Validation on `EmployeeRequest` (`@Valid`) |
 | Exception handling | `GlobalExceptionHandler` (`@RestControllerAdvice`) with one JSON error format |
 | Database | PostgreSQL (default) or MySQL via environment variables |
+| Bulk operations | `/api/v1/employees/bulk` for create, get, update and delete of many employees (max 100, all-or-nothing) |
 | Pagination & sorting | `page`, `size`, `sort` query params (sort fields whitelisted) |
 | Search | `search` param: name, email, department, designation (case-insensitive) |
 | Status filter | `status` param: `ACTIVE`, `INACTIVE`, `ON_LEAVE` |
@@ -50,6 +51,7 @@ src/main/java/com/example/employee
 - **Transactions** – service is `@Transactional(readOnly = true)` by default, with write methods overriding.
 - **`spring.jpa.open-in-view=false`**, stack traces and internal messages are never leaked to clients.
 - **Sort whitelist** prevents clients from sorting on arbitrary properties.
+- **Bulk operations are transactional and all-or-nothing**: every item is validated and checked (missing IDs, duplicate emails) before anything is written, using batched queries (`findAllById`, `findByEmailIn`, `saveAll`, `deleteAllByIdInBatch`) instead of per-item lookups.
 
 ## Prerequisites
 
@@ -121,7 +123,7 @@ Both drivers are on the classpath; Hibernate detects the dialect automatically f
 
 - Swagger UI: http://localhost:8080/swagger-ui.html
 - OpenAPI JSON: http://localhost:8080/v3/api-docs
-- Postman collection: `docs/Employee-Management-API.postman_collection.json` (import into Postman; `baseUrl` defaults to `http://localhost:8080`)
+- Postman collection: `docs/Employee-Management-API.postman_collection.json` (import into Postman; `baseUrl` defaults to `http://localhost:8080`). It has two folders, **Single employee** and **Bulk employees**, including error cases. Run each folder top to bottom; create requests store IDs in collection variables used by later requests.
 
 ### Endpoints
 
@@ -132,6 +134,10 @@ Both drivers are on the classpath; Hibernate detects the dialect automatically f
 | GET | `/api/v1/employees/{id}` | Get by ID | 200 |
 | PUT | `/api/v1/employees/{id}` | Update employee | 200 |
 | DELETE | `/api/v1/employees/{id}` | Delete employee | 204 |
+| POST | `/api/v1/employees/bulk` | Create many (JSON array, max 100) | 201 |
+| GET | `/api/v1/employees/bulk?ids=1,2,3` | Get many by IDs | 200 |
+| PUT | `/api/v1/employees/bulk` | Update many (array of `{id, employee}`) | 200 |
+| DELETE | `/api/v1/employees/bulk?ids=1,2,3` | Delete many by IDs | 204 |
 
 **List query params:** `page` (0-based, default 0), `size` (default 10), `sort` (e.g. `salary,desc`),
 `search`, `status`. Sortable fields: `id, firstName, lastName, email, department, designation, salary, dateOfJoining, status, createdAt`.
@@ -147,6 +153,16 @@ Both drivers are on the classpath; Hibernate detects the dialect automatically f
 | `salary` | required, > 0, up to 10 integer + 2 fraction digits |
 | `dateOfJoining` | required, `yyyy-MM-dd`, not in the future |
 | `status` | optional, `ACTIVE` \| `INACTIVE` \| `ON_LEAVE` (default `ACTIVE`) |
+
+### Bulk operation rules
+
+- Maximum **100** items (or IDs) per request; an empty list returns 400.
+- **All-or-nothing**: if any item fails validation, an ID is missing or an email conflicts, nothing is saved, updated or deleted.
+- Each item uses the same validation rules as the single endpoints.
+- **Bulk create**: emails must be unique within the request and not already exist (409).
+- **Bulk update**: the body is an array of `{ "id": ..., "employee": { ... } }`; IDs must be unique within the request (400), all must exist (404), and emails must not collide with other employees or each other (409).
+- **Bulk get / delete**: pass IDs as a comma-separated `ids` query parameter. Duplicate IDs are ignored; any missing ID returns 404 listing the missing IDs.
+- `GET/PUT/DELETE /bulk` do not conflict with `/{id}` because `bulk` is a literal path segment.
 
 ## Sample requests & responses
 
@@ -256,6 +272,108 @@ curl -i -X DELETE http://localhost:8080/api/v1/employees/1
 
 Returns `204 No Content`.
 
+### Bulk create
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/employees/bulk \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"firstName":"Meera","lastName":"Pillai","email":"meera.pillai@example.com","department":"Engineering",
+     "designation":"Software Engineer","salary":80000,"dateOfJoining":"2024-01-10"},
+    {"firstName":"Ravi","lastName":"Nair","email":"ravi.nair@example.com","department":"HR",
+     "designation":"HR Manager","salary":70000,"dateOfJoining":"2023-02-01","status":"ACTIVE"}
+  ]'
+```
+
+`201 Created` returns an array of the created employees:
+
+```json
+[
+  { "id": 2, "firstName": "Meera", "lastName": "Pillai", "email": "meera.pillai@example.com",
+    "phone": null, "department": "Engineering", "designation": "Software Engineer",
+    "salary": 80000.00, "dateOfJoining": "2024-01-10", "status": "ACTIVE",
+    "createdAt": "2026-10-23T10:00:00.120Z", "updatedAt": "2026-10-23T10:00:00.120Z" },
+  { "id": 3, "firstName": "Ravi", "lastName": "Nair", "email": "ravi.nair@example.com",
+    "phone": null, "department": "HR", "designation": "HR Manager",
+    "salary": 70000.00, "dateOfJoining": "2023-02-01", "status": "ACTIVE",
+    "createdAt": "2026-10-23T10:00:00.120Z", "updatedAt": "2026-10-23T10:00:00.120Z" }
+]
+```
+
+### Bulk get
+
+```bash
+curl "http://localhost:8080/api/v1/employees/bulk?ids=2,3"
+```
+
+Returns `200 OK` with an array of employees in the order the IDs were requested.
+
+### Bulk update
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/employees/bulk \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"id": 2, "employee": {"firstName":"Meera","lastName":"Pillai","email":"meera.pillai@example.com",
+      "department":"Engineering","designation":"Senior Software Engineer","salary":105000,
+      "dateOfJoining":"2024-01-10","status":"ACTIVE"}},
+    {"id": 3, "employee": {"firstName":"Ravi","lastName":"Nair","email":"ravi.nair@example.com",
+      "department":"HR","designation":"HR Director","salary":95000,
+      "dateOfJoining":"2023-02-01","status":"ON_LEAVE"}}
+  ]'
+```
+
+Returns `200 OK` with an array of the updated employees.
+
+### Bulk delete
+
+```bash
+curl -i -X DELETE "http://localhost:8080/api/v1/employees/bulk?ids=2,3"
+```
+
+Returns `204 No Content`.
+
+### Bulk error examples
+
+**400 - validation failed on one item** (field keys include the list index):
+
+```json
+{
+  "timestamp": "2026-10-23T10:05:00.450Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Validation failed",
+  "path": "/api/v1/employees/bulk",
+  "fieldErrors": {
+    "requests[1].email": "Email must be a valid email address"
+  }
+}
+```
+
+**404 - one or more IDs missing** (nothing is changed):
+
+```json
+{
+  "timestamp": "2026-10-23T10:06:12.300Z",
+  "status": 404,
+  "error": "Not Found",
+  "message": "Employee not found with id: [999]",
+  "path": "/api/v1/employees/bulk"
+}
+```
+
+**409 - duplicate emails:**
+
+```json
+{
+  "timestamp": "2026-10-23T10:07:30.015Z",
+  "status": 409,
+  "error": "Conflict",
+  "message": "Duplicate emails within the request: [dup@example.com]",
+  "path": "/api/v1/employees/bulk"
+}
+```
+
 ## Error responses
 
 All errors share one shape.
@@ -303,10 +421,10 @@ All errors share one shape.
 
 | Status | When |
 |---|---|
-| 400 | Validation errors, malformed JSON, bad enum/date, invalid path/query value, invalid sort field |
-| 404 | Employee ID does not exist |
+| 400 | Validation errors, malformed JSON, bad enum/date, invalid path/query value, invalid sort field, empty or oversized bulk list, duplicate IDs in bulk update |
+| 404 | Employee ID does not exist (bulk: any listed ID missing) |
 | 405 | HTTP method not supported |
-| 409 | Duplicate email / DB integrity conflict |
+| 409 | Duplicate email (including inside a bulk request) / DB integrity conflict |
 | 500 | Unexpected error (details logged server-side only) |
 
 ## Publishing to GitHub
