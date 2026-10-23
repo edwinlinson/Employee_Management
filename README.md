@@ -67,7 +67,7 @@ src/main/java/com/example/employee
 docker compose up -d postgres
 ```
 
-This creates PostgreSQL 16 with database `employee_db`, user `postgres`, password `postgres` on port 5432.
+This creates PostgreSQL 16 with database `employee_db`, user `postgres`, password `password` on port 5432.
 Without Docker, create the DB yourself: `CREATE DATABASE employee_db;`
 
 ### 2. Run the application
